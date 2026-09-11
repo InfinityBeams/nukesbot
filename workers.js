@@ -1,4 +1,4 @@
-const COMMAND_NAME = "send";
+zconst COMMAND_NAME = "send";
 
 export default {
   async fetch(request, env) {
