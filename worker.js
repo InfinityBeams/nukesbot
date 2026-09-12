@@ -4,7 +4,7 @@
 
 const SEND_MESSAGE = "PUT YOUR /send MESSAGE HERE";
 
-const PLACEHOLDER_MESSAGE = "PUT YOUR /placeholder MESSAGE HERE";
+const PLACEHOLDER_MESSAGE = "TEST";
 
 
 // ========================================
