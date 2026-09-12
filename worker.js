@@ -1,16 +1,8 @@
 const COMMANDS = [
   {
     name: "send",
-    description: "Send a message in this channel",
-    type: 1,
-    options: [
-      {
-        name: "message",
-        description: "Message to send",
-        type: 3,
-        required: true
-      }
-    ]
+    description: "Send the custom message",
+    type: 1
   },
   {
     name: "create-channel",
@@ -103,15 +95,9 @@ async function handleInteraction(request, env) {
 // ================================
 
 async function handleSend(interaction, env) {
-  const messageOption = interaction.data?.options?.find(
-    option => option.name === "message"
-  );
 
-  const message = messageOption?.value;
-
-  if (!message) {
-    return reply("❌ Please provide a message.");
-  }
+  // 👇 CHANGE THIS MESSAGE TO WHATEVER YOU WANT
+  const message = "🔥 This is my custom message!";
 
   const response = await discordRequest(
     `/channels/${interaction.channel_id}/messages`,
@@ -141,7 +127,6 @@ async function handleCreateChannel(interaction, env) {
     return reply("❌ This command can only be used inside a server.");
   }
 
-  // Check that the user has Manage Channels permission
   const permissions = BigInt(
     interaction.member?.permissions || "0"
   );
@@ -164,7 +149,6 @@ async function handleCreateChannel(interaction, env) {
     return reply("❌ Please provide a channel name.");
   }
 
-  // Discord channel names have restrictions
   name = name
     .toLowerCase()
     .replace(/\s+/g, "-")
