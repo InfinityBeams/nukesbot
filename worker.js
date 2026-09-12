@@ -14,7 +14,7 @@ const PLACEHOLDER_MESSAGE = "PUT YOUR /placeholder MESSAGE HERE";
 const COMMANDS = [
   {
     name: "send",
-    description: "Send the custom message",
+    description: "Send the custom message 5 times",
     type: 1
   },
 
@@ -92,7 +92,6 @@ async function handleInteraction(request, env) {
 
   const interaction = JSON.parse(body);
 
-  // Discord verification
   if (interaction.type === 1) {
     return json({ type: 1 });
   }
@@ -103,53 +102,52 @@ async function handleInteraction(request, env) {
 
   const command = interaction.data?.name;
 
-
-  // /send
   if (command === "send") {
     return handleSend(interaction, env);
   }
 
-
-  // /placeholder
   if (command === "placeholder") {
     return handlePlaceholder(interaction, env);
   }
 
-
-  // /create-channel
   if (command === "create-channel") {
     return handleCreateChannel(interaction, env);
   }
-
 
   return reply("❌ Unknown command.");
 }
 
 
 // ========================================
-// /SEND
+// /SEND — SENDS MESSAGE 5 TIMES
 // ========================================
 
 async function handleSend(interaction, env) {
 
-  const response = await discordRequest(
-    `/channels/${interaction.channel_id}/messages`,
-    "POST",
-    env.BOT_TOKEN,
-    {
-      content: SEND_MESSAGE
-    }
-  );
+  for (let i = 0; i < 5; i++) {
 
-  if (!response.ok) {
-    const error = await response.text();
-
-    return reply(
-      `❌ I couldn't send the message.\n\`\`\`${error.slice(0, 500)}\`\`\``
+    const response = await discordRequest(
+      `/channels/${interaction.channel_id}/messages`,
+      "POST",
+      env.BOT_TOKEN,
+      {
+        content: SEND_MESSAGE
+      }
     );
+
+    if (!response.ok) {
+      const error = await response.text();
+
+      return reply(
+        `❌ I couldn't send the message.\n\`\`\`${error.slice(0, 500)}\`\`\``
+      );
+    }
+
+    // 500ms between messages
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
 
-  return reply("✅ Message sent.");
+  return reply("✅ Message sent 5 times.");
 }
 
 
@@ -194,9 +192,6 @@ async function handleCreateChannel(interaction, env) {
     );
   }
 
-
-  // Check user's Manage Channels permission
-
   const permissions = BigInt(
     interaction.member?.permissions || "0"
   );
@@ -209,9 +204,6 @@ async function handleCreateChannel(interaction, env) {
     );
   }
 
-
-  // Get channel name
-
   const nameOption = interaction.data?.options?.find(
     option => option.name === "name"
   );
@@ -219,13 +211,8 @@ async function handleCreateChannel(interaction, env) {
   let name = nameOption?.value;
 
   if (!name) {
-    return reply(
-      "❌ Please provide a channel name."
-    );
+    return reply("❌ Please provide a channel name.");
   }
-
-
-  // Format channel name
 
   name = name
     .toLowerCase()
@@ -233,15 +220,9 @@ async function handleCreateChannel(interaction, env) {
     .replace(/[^a-z0-9-_]/g, "")
     .slice(0, 100);
 
-
   if (!name) {
-    return reply(
-      "❌ Invalid channel name."
-    );
+    return reply("❌ Invalid channel name.");
   }
-
-
-  // Create channel
 
   const response = await discordRequest(
     `/guilds/${guildId}/channels`,
@@ -253,7 +234,6 @@ async function handleCreateChannel(interaction, env) {
     }
   );
 
-
   if (!response.ok) {
     const error = await response.text();
 
@@ -262,10 +242,7 @@ async function handleCreateChannel(interaction, env) {
     );
   }
 
-
-  return reply(
-    `✅ Created **#${name}**.`
-  );
+  return reply(`✅ Created **#${name}**.`);
 }
 
 
@@ -279,23 +256,18 @@ async function registerCommands(env) {
     `https://discord.com/api/v10/applications/${env.CLIENT_ID}/commands`,
     {
       method: "PUT",
-
       headers: {
         "Authorization": `Bot ${env.BOT_TOKEN}`,
         "Content-Type": "application/json"
       },
-
       body: JSON.stringify(COMMANDS)
     }
   );
 
-
   const result = await response.text();
-
 
   return new Response(result, {
     status: response.status,
-
     headers: {
       "Content-Type": "application/json"
     }
@@ -307,12 +279,7 @@ async function registerCommands(env) {
 // DISCORD API REQUEST
 // ========================================
 
-async function discordRequest(
-  path,
-  method,
-  token,
-  body
-) {
+async function discordRequest(path, method, token, body) {
 
   return fetch(
     `https://discord.com/api/v10${path}`,
@@ -331,7 +298,7 @@ async function discordRequest(
 
 
 // ========================================
-// DISCORD SIGNATURE VERIFICATION
+// SIGNATURE VERIFICATION
 // ========================================
 
 async function verifyDiscordRequest(
@@ -347,13 +314,11 @@ async function verifyDiscordRequest(
       timestamp + body
     );
 
-
     const signatureBytes =
       hexToBytes(signature);
 
     const publicKeyBytes =
       hexToBytes(publicKey);
-
 
     const key =
       await crypto.subtle.importKey(
@@ -366,36 +331,30 @@ async function verifyDiscordRequest(
         ["verify"]
       );
 
-
     return await crypto.subtle.verify(
       {
         name: "Ed25519"
       },
-
       key,
-
       signatureBytes,
-
       message
     );
 
   } catch {
 
     return false;
-
   }
 }
 
 
 // ========================================
-// HEX → BYTES
+// HEX TO BYTES
 // ========================================
 
 function hexToBytes(hex) {
 
   const bytes =
     new Uint8Array(hex.length / 2);
-
 
   for (
     let i = 0;
@@ -410,7 +369,6 @@ function hexToBytes(hex) {
       );
   }
 
-
   return bytes;
 }
 
@@ -419,17 +377,12 @@ function hexToBytes(hex) {
 // JSON RESPONSE
 // ========================================
 
-function json(
-  data,
-  status = 200
-) {
+function json(data, status = 200) {
 
   return new Response(
     JSON.stringify(data),
-
     {
       status: status,
-
       headers: {
         "Content-Type": "application/json"
       }
@@ -445,12 +398,9 @@ function json(
 function reply(content) {
 
   return json({
-
     type: 4,
-
     data: {
       content: content
     }
-
   });
 }
