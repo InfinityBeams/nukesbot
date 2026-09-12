@@ -45,7 +45,7 @@ const COMMANDS = [
 // ========================================
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/") {
@@ -53,7 +53,7 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === "/interactions") {
-      return handleInteraction(request, env);
+      return handleInteraction(request, env, ctx);
     }
 
     if (request.method === "GET" && url.pathname === "/register") {
@@ -69,7 +69,7 @@ export default {
 // DISCORD INTERACTIONS
 // ========================================
 
-async function handleInteraction(request, env) {
+async function handleInteraction(request, env, ctx) {
   const signature = request.headers.get("X-Signature-Ed25519");
   const timestamp = request.headers.get("X-Signature-Timestamp");
 
@@ -92,6 +92,7 @@ async function handleInteraction(request, env) {
 
   const interaction = JSON.parse(body);
 
+  // Discord verification
   if (interaction.type === 1) {
     return json({ type: 1 });
   }
@@ -103,7 +104,7 @@ async function handleInteraction(request, env) {
   const command = interaction.data?.name;
 
   if (command === "send") {
-    return handleSend(interaction, env);
+    return handleSend(interaction, env, ctx);
   }
 
   if (command === "placeholder") {
@@ -122,7 +123,27 @@ async function handleInteraction(request, env) {
 // /SEND — SENDS MESSAGE 5 TIMES
 // ========================================
 
-async function handleSend(interaction, env) {
+async function handleSend(interaction, env, ctx) {
+
+  // Send the first interaction response immediately
+  const response = reply(
+    "✅ Sending the message 5 times..."
+  );
+
+  // Continue sending after responding to Discord
+  ctx.waitUntil(
+    sendFiveMessages(interaction, env)
+  );
+
+  return response;
+}
+
+
+// ========================================
+// SEND FIVE MESSAGES
+// ========================================
+
+async function sendFiveMessages(interaction, env) {
 
   for (let i = 0; i < 5; i++) {
 
@@ -136,18 +157,21 @@ async function handleSend(interaction, env) {
     );
 
     if (!response.ok) {
-      const error = await response.text();
-
-      return reply(
-        `❌ I couldn't send the message.\n\`\`\`${error.slice(0, 500)}\`\`\``
+      console.log(
+        "Failed to send message:",
+        await response.text()
       );
+
+      return;
     }
 
-    // 500ms between messages
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Wait 500ms before the next message
+    if (i < 4) {
+      await new Promise(
+        resolve => setTimeout(resolve, 500)
+      );
+    }
   }
-
-  return reply("✅ Message sent 5 times.");
 }
 
 
@@ -211,7 +235,9 @@ async function handleCreateChannel(interaction, env) {
   let name = nameOption?.value;
 
   if (!name) {
-    return reply("❌ Please provide a channel name.");
+    return reply(
+      "❌ Please provide a channel name."
+    );
   }
 
   name = name
@@ -221,7 +247,9 @@ async function handleCreateChannel(interaction, env) {
     .slice(0, 100);
 
   if (!name) {
-    return reply("❌ Invalid channel name.");
+    return reply(
+      "❌ Invalid channel name."
+    );
   }
 
   const response = await discordRequest(
@@ -256,10 +284,12 @@ async function registerCommands(env) {
     `https://discord.com/api/v10/applications/${env.CLIENT_ID}/commands`,
     {
       method: "PUT",
+
       headers: {
         "Authorization": `Bot ${env.BOT_TOKEN}`,
         "Content-Type": "application/json"
       },
+
       body: JSON.stringify(COMMANDS)
     }
   );
@@ -279,7 +309,12 @@ async function registerCommands(env) {
 // DISCORD API REQUEST
 // ========================================
 
-async function discordRequest(path, method, token, body) {
+async function discordRequest(
+  path,
+  method,
+  token,
+  body
+) {
 
   return fetch(
     `https://discord.com/api/v10${path}`,
@@ -383,6 +418,7 @@ function json(data, status = 200) {
     JSON.stringify(data),
     {
       status: status,
+
       headers: {
         "Content-Type": "application/json"
       }
@@ -399,6 +435,7 @@ function reply(content) {
 
   return json({
     type: 4,
+
     data: {
       content: content
     }
