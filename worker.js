@@ -1,63 +1,34 @@
-// ========================================
-// CUSTOM MESSAGES
-// ========================================
+import { DurableObject } from "cloudflare:workers";
 
-const SEND_MESSAGE = "PUT YOUR /send MESSAGE HERE";
+const PREFIX = ",";
 
-const PLACEHOLDER_MESSAGE = "TEST";
-
-
-// ========================================
-// SLASH COMMANDS
-// ========================================
-
-const COMMANDS = [
-  {
-    name: "send",
-    description: "Send the custom message 5 times",
-    type: 1
-  },
-
-  {
-    name: "placeholder",
-    description: "Send the placeholder message",
-    type: 1
-  },
-
-  {
-    name: "create-channel",
-    description: "Create a text channel",
-    type: 1,
-    options: [
-      {
-        name: "name",
-        description: "Name of the new channel",
-        type: 3,
-        required: true
-      }
-    ]
-  }
-];
+const GATEWAY_INTENTS =
+  1 |        // GUILDS
+  512 |      // GUILD_MESSAGES
+  32768;     // MESSAGE_CONTENT
 
 
 // ========================================
-// WORKER
+// MAIN WORKER
 // ========================================
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/") {
-      return new Response("Discord bot is running!");
+    // Health check
+    if (url.pathname === "/") {
+      return new Response("Timezone bot is running!");
     }
 
-    if (request.method === "POST" && url.pathname === "/interactions") {
-      return handleInteraction(request, env, ctx);
-    }
+    // Start/restart Discord Gateway connection
+    if (url.pathname === "/start") {
+      const id = env.TIMEZONE_BOT.idFromName("discord-gateway");
+      const bot = env.TIMEZONE_BOT.get(id);
 
-    if (request.method === "GET" && url.pathname === "/register") {
-      return registerCommands(env);
+      await bot.fetch("https://internal/start");
+
+      return new Response("Discord Gateway connection started.");
     }
 
     return new Response("Not found", { status: 404 });
@@ -66,109 +37,526 @@ export default {
 
 
 // ========================================
-// DISCORD INTERACTIONS
+// DURABLE OBJECT
 // ========================================
 
-async function handleInteraction(request, env, ctx) {
-  const signature = request.headers.get("X-Signature-Ed25519");
-  const timestamp = request.headers.get("X-Signature-Timestamp");
+export class TimezoneBot extends DurableObject {
 
-  if (!signature || !timestamp) {
-    return new Response("Missing signature", { status: 401 });
+  constructor(ctx, env) {
+    super(ctx, env);
+
+    this.env = env;
+    this.ws = null;
+    this.heartbeatTimer = null;
+    this.gatewayUrl = null;
+    this.reconnectTimer = null;
   }
 
-  const body = await request.text();
 
-  const valid = await verifyDiscordRequest(
-    body,
-    signature,
-    timestamp,
-    env.PUBLIC_KEY
-  );
+  async fetch(request) {
 
-  if (!valid) {
-    return new Response("Invalid signature", { status: 401 });
+    const url = new URL(request.url);
+
+    if (url.pathname === "/start") {
+      await this.connectToDiscord();
+
+      return new Response("Started");
+    }
+
+    return new Response("Not found", {
+      status: 404
+    });
   }
 
-  const interaction = JSON.parse(body);
 
-  // Discord verification
-  if (interaction.type === 1) {
-    return json({ type: 1 });
-  }
+  // ========================================
+  // CONNECT TO DISCORD
+  // ========================================
 
-  if (interaction.type !== 2) {
-    return new Response("OK");
-  }
+  async connectToDiscord() {
 
-  const command = interaction.data?.name;
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {}
+    }
 
-  if (command === "send") {
-    return handleSend(interaction, env, ctx);
-  }
+    try {
 
-  if (command === "placeholder") {
-    return handlePlaceholder(interaction, env);
-  }
+      const gatewayResponse = await fetch(
+        "https://discord.com/api/v10/gateway/bot",
+        {
+          headers: {
+            "Authorization": `Bot ${this.env.BOT_TOKEN}`
+          }
+        }
+      );
 
-  if (command === "create-channel") {
-    return handleCreateChannel(interaction, env);
-  }
+      if (!gatewayResponse.ok) {
+        console.log(
+          "Gateway request failed:",
+          await gatewayResponse.text()
+        );
 
-  return reply("❌ Unknown command.");
-}
-
-
-// ========================================
-// /SEND — SENDS MESSAGE 5 TIMES
-// ========================================
-
-async function handleSend(interaction, env, ctx) {
-
-  // Send the first interaction response immediately
-  const response = reply(
-    "✅ Sending the message 5 times..."
-  );
-
-  // Continue sending after responding to Discord
-  ctx.waitUntil(
-    sendFiveMessages(interaction, env)
-  );
-
-  return response;
-}
-
-
-// ========================================
-// SEND FIVE MESSAGES
-// ========================================
-
-async function sendFiveMessages(interaction, env) {
-
-  for (let i = 0; i < 5; i++) {
-
-    const response = await discordRequest(
-      `/channels/${interaction.channel_id}/messages`,
-      "POST",
-      env.BOT_TOKEN,
-      {
-        content: SEND_MESSAGE
+        this.scheduleReconnect();
+        return;
       }
-    );
 
-    if (!response.ok) {
+      const gatewayData =
+        await gatewayResponse.json();
+
+      this.gatewayUrl =
+        gatewayData.url;
+
+      const ws =
+        new WebSocket(
+          `${this.gatewayUrl}/?v=10&encoding=json`
+        );
+
+      this.ws = ws;
+
+
+      ws.addEventListener(
+        "open",
+        () => {
+          console.log(
+            "Connected to Discord Gateway"
+          );
+        }
+      );
+
+
+      ws.addEventListener(
+        "message",
+        event => {
+          this.handleGatewayMessage(
+            event.data
+          );
+        }
+      );
+
+
+      ws.addEventListener(
+        "close",
+        () => {
+          console.log(
+            "Discord Gateway disconnected"
+          );
+
+          this.cleanupHeartbeat();
+
+          this.ws = null;
+
+          this.scheduleReconnect();
+        }
+      );
+
+
+      ws.addEventListener(
+        "error",
+        error => {
+          console.log(
+            "Gateway WebSocket error:",
+            error
+          );
+        }
+      );
+
+    } catch (error) {
+
       console.log(
-        "Failed to send message:",
-        await response.text()
+        "Gateway connection error:",
+        error
+      );
+
+      this.scheduleReconnect();
+    }
+  }
+
+
+  // ========================================
+  // GATEWAY MESSAGE
+  // ========================================
+
+  async handleGatewayMessage(rawData) {
+
+    let data;
+
+    try {
+      data = JSON.parse(rawData);
+    } catch {
+      return;
+    }
+
+
+    const op = data.op;
+
+
+    // Hello
+    if (op === 10) {
+
+      const heartbeatInterval =
+        data.d.heartbeat_interval;
+
+      this.startHeartbeat(
+        heartbeatInterval
+      );
+
+      this.identify();
+
+      return;
+    }
+
+
+    // Heartbeat request
+    if (op === 1) {
+
+      this.sendHeartbeat();
+
+      return;
+    }
+
+
+    // Reconnect
+    if (op === 7) {
+
+      try {
+        this.ws?.close();
+      } catch {}
+
+      return;
+    }
+
+
+    // Invalid session
+    if (op === 9) {
+
+      try {
+        this.ws?.close();
+      } catch {}
+
+      return;
+    }
+
+
+    // Dispatch event
+    if (op === 0) {
+
+      const eventName =
+        data.t;
+
+      if (eventName === "MESSAGE_CREATE") {
+        await this.handleMessage(
+          data.d
+        );
+      }
+    }
+  }
+
+
+  // ========================================
+  // IDENTIFY
+  // ========================================
+
+  identify() {
+
+    if (!this.ws) {
+      return;
+    }
+
+    this.ws.send(
+      JSON.stringify({
+        op: 2,
+
+        d: {
+          token: this.env.BOT_TOKEN,
+
+          intents: GATEWAY_INTENTS,
+
+          properties: {
+            os: "linux",
+            browser: "cloudflare-worker",
+            device: "cloudflare-worker"
+          }
+        }
+      })
+    );
+  }
+
+
+  // ========================================
+  // HEARTBEAT
+  // ========================================
+
+  startHeartbeat(interval) {
+
+    this.cleanupHeartbeat();
+
+    this.heartbeatTimer =
+      setInterval(
+        () => {
+          this.sendHeartbeat();
+        },
+        interval
+      );
+  }
+
+
+  sendHeartbeat() {
+
+    if (
+      this.ws &&
+      this.ws.readyState === WebSocket.OPEN
+    ) {
+
+      this.ws.send(
+        JSON.stringify({
+          op: 1,
+          d: null
+        })
+      );
+    }
+  }
+
+
+  cleanupHeartbeat() {
+
+    if (this.heartbeatTimer) {
+
+      clearInterval(
+        this.heartbeatTimer
+      );
+
+      this.heartbeatTimer = null;
+    }
+  }
+
+
+  // ========================================
+  // RECONNECT
+  // ========================================
+
+  scheduleReconnect() {
+
+    if (this.reconnectTimer) {
+      return;
+    }
+
+    this.reconnectTimer =
+      setTimeout(
+        async () => {
+
+          this.reconnectTimer = null;
+
+          await this.connectToDiscord();
+
+        },
+        5000
+      );
+  }
+
+
+  // ========================================
+  // MESSAGE HANDLER
+  // ========================================
+
+  async handleMessage(message) {
+
+    // Ignore bots
+    if (message.author?.bot) {
+      return;
+    }
+
+    const content =
+      message.content?.trim();
+
+    if (!content) {
+      return;
+    }
+
+    if (!content.startsWith(PREFIX)) {
+      return;
+    }
+
+
+    const args =
+      content
+        .slice(PREFIX.length)
+        .trim()
+        .split(/\s+/);
+
+
+    const command =
+      args.shift()?.toLowerCase();
+
+
+    if (command !== "tz") {
+      return;
+    }
+
+
+    // ,tz
+    if (args.length === 0) {
+
+      await this.showTimezone(
+        message,
+        message.author.id,
+        message.author.username
       );
 
       return;
     }
 
-    // Wait 500ms before the next message
-    if (i < 4) {
-      await new Promise(
-        resolve => setTimeout(resolve, 500)
+
+    // ,tz set Asia/Karachi
+    if (
+      args[0]?.toLowerCase() === "set"
+    ) {
+
+      const timezone =
+        args[1];
+
+      if (!timezone) {
+
+        await this.sendMessage(
+          message.channel_id,
+          "❌ Usage: `,tz set Asia/Karachi`"
+        );
+
+        return;
+      }
+
+
+      if (!isValidTimezone(timezone)) {
+
+        await this.sendMessage(
+          message.channel_id,
+          "❌ Invalid timezone. Example: `Asia/Karachi`"
+        );
+
+        return;
+      }
+
+
+      await this.ctx.storage.put(
+        `tz:${message.author.id}`,
+        timezone
+      );
+
+
+      const time =
+        getCurrentTime(timezone);
+
+
+      await this.sendMessage(
+        message.channel_id,
+        `✅ Your timezone is now **${timezone}**.\n🕐 Current time: **${time}**`
+      );
+
+      return;
+    }
+
+
+    // ,tz @user
+    const mentionedUser =
+      getMentionedUser(
+        message,
+        args
+      );
+
+
+    if (mentionedUser) {
+
+      await this.showTimezone(
+        message,
+        mentionedUser.id,
+        mentionedUser.username
+      );
+
+      return;
+    }
+
+
+    await this.sendMessage(
+      message.channel_id,
+      "❌ Usage:\n`,tz set Asia/Karachi`\n`,tz @username`"
+    );
+  }
+
+
+  // ========================================
+  // SHOW TIMEZONE
+  // ========================================
+
+  async showTimezone(
+    message,
+    userId,
+    username
+  ) {
+
+    const timezone =
+      await this.ctx.storage.get(
+        `tz:${userId}`
+      );
+
+
+    if (!timezone) {
+
+      await this.sendMessage(
+        message.channel_id,
+        `❌ **${username}** hasn't set a timezone yet.`
+      );
+
+      return;
+    }
+
+
+    const time =
+      getCurrentTime(timezone);
+
+
+    await this.sendMessage(
+      message.channel_id,
+      `🌍 **${username}**'s timezone: **${timezone}**\n🕐 Current time: **${time}**`
+    );
+  }
+
+
+  // ========================================
+  // SEND DISCORD MESSAGE
+  // ========================================
+
+  async sendMessage(
+    channelId,
+    content
+  ) {
+
+    const response =
+      await fetch(
+        `https://discord.com/api/v10/channels/${channelId}/messages`,
+        {
+          method: "POST",
+
+          headers: {
+            "Authorization":
+              `Bot ${this.env.BOT_TOKEN}`,
+
+            "Content-Type":
+              "application/json"
+          },
+
+          body: JSON.stringify({
+            content
+          })
+        }
+      );
+
+
+    if (!response.ok) {
+
+      console.log(
+        "Failed to send Discord message:",
+        await response.text()
       );
     }
   }
@@ -176,204 +564,21 @@ async function sendFiveMessages(interaction, env) {
 
 
 // ========================================
-// /PLACEHOLDER
+// VALIDATE TIMEZONE
 // ========================================
 
-async function handlePlaceholder(interaction, env) {
-
-  const response = await discordRequest(
-    `/channels/${interaction.channel_id}/messages`,
-    "POST",
-    env.BOT_TOKEN,
-    {
-      content: PLACEHOLDER_MESSAGE
-    }
-  );
-
-  if (!response.ok) {
-    const error = await response.text();
-
-    return reply(
-      `❌ I couldn't send the message.\n\`\`\`${error.slice(0, 500)}\`\`\``
-    );
-  }
-
-  return reply("✅ Placeholder message sent.");
-}
-
-
-// ========================================
-// /CREATE-CHANNEL
-// ========================================
-
-async function handleCreateChannel(interaction, env) {
-
-  const guildId = interaction.guild_id;
-
-  if (!guildId) {
-    return reply(
-      "❌ This command can only be used inside a server."
-    );
-  }
-
-  const permissions = BigInt(
-    interaction.member?.permissions || "0"
-  );
-
-  const MANAGE_CHANNELS = BigInt(0x10);
-
-  if ((permissions & MANAGE_CHANNELS) === BigInt(0)) {
-    return reply(
-      "❌ You need the **Manage Channels** permission to use this command."
-    );
-  }
-
-  const nameOption = interaction.data?.options?.find(
-    option => option.name === "name"
-  );
-
-  let name = nameOption?.value;
-
-  if (!name) {
-    return reply(
-      "❌ Please provide a channel name."
-    );
-  }
-
-  name = name
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-_]/g, "")
-    .slice(0, 100);
-
-  if (!name) {
-    return reply(
-      "❌ Invalid channel name."
-    );
-  }
-
-  const response = await discordRequest(
-    `/guilds/${guildId}/channels`,
-    "POST",
-    env.BOT_TOKEN,
-    {
-      name: name,
-      type: 0
-    }
-  );
-
-  if (!response.ok) {
-    const error = await response.text();
-
-    return reply(
-      `❌ Couldn't create the channel.\n\`\`\`${error.slice(0, 500)}\`\`\``
-    );
-  }
-
-  return reply(`✅ Created **#${name}**.`);
-}
-
-
-// ========================================
-// REGISTER SLASH COMMANDS
-// ========================================
-
-async function registerCommands(env) {
-
-  const response = await fetch(
-    `https://discord.com/api/v10/applications/${env.CLIENT_ID}/commands`,
-    {
-      method: "PUT",
-
-      headers: {
-        "Authorization": `Bot ${env.BOT_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-
-      body: JSON.stringify(COMMANDS)
-    }
-  );
-
-  const result = await response.text();
-
-  return new Response(result, {
-    status: response.status,
-    headers: {
-      "Content-Type": "application/json"
-    }
-  });
-}
-
-
-// ========================================
-// DISCORD API REQUEST
-// ========================================
-
-async function discordRequest(
-  path,
-  method,
-  token,
-  body
-) {
-
-  return fetch(
-    `https://discord.com/api/v10${path}`,
-    {
-      method: method,
-
-      headers: {
-        "Authorization": `Bot ${token}`,
-        "Content-Type": "application/json"
-      },
-
-      body: JSON.stringify(body)
-    }
-  );
-}
-
-
-// ========================================
-// SIGNATURE VERIFICATION
-// ========================================
-
-async function verifyDiscordRequest(
-  body,
-  signature,
-  timestamp,
-  publicKey
-) {
+function isValidTimezone(timezone) {
 
   try {
 
-    const message = new TextEncoder().encode(
-      timestamp + body
-    );
-
-    const signatureBytes =
-      hexToBytes(signature);
-
-    const publicKeyBytes =
-      hexToBytes(publicKey);
-
-    const key =
-      await crypto.subtle.importKey(
-        "raw",
-        publicKeyBytes,
-        {
-          name: "Ed25519"
-        },
-        false,
-        ["verify"]
-      );
-
-    return await crypto.subtle.verify(
+    new Intl.DateTimeFormat(
+      "en-US",
       {
-        name: "Ed25519"
-      },
-      key,
-      signatureBytes,
-      message
-    );
+        timeZone: timezone
+      }
+    ).format();
+
+    return true;
 
   } catch {
 
@@ -383,61 +588,65 @@ async function verifyDiscordRequest(
 
 
 // ========================================
-// HEX TO BYTES
+// CURRENT TIME
 // ========================================
 
-function hexToBytes(hex) {
+function getCurrentTime(timezone) {
 
-  const bytes =
-    new Uint8Array(hex.length / 2);
-
-  for (
-    let i = 0;
-    i < hex.length;
-    i += 2
-  ) {
-
-    bytes[i / 2] =
-      parseInt(
-        hex.substring(i, i + 2),
-        16
-      );
-  }
-
-  return bytes;
-}
-
-
-// ========================================
-// JSON RESPONSE
-// ========================================
-
-function json(data, status = 200) {
-
-  return new Response(
-    JSON.stringify(data),
+  return new Intl.DateTimeFormat(
+    "en-US",
     {
-      status: status,
+      timeZone: timezone,
 
-      headers: {
-        "Content-Type": "application/json"
-      }
+      hour: "numeric",
+      minute: "2-digit",
+
+      hour12: true
     }
+  ).format(
+    new Date()
   );
 }
 
 
 // ========================================
-// DISCORD REPLY
+// GET @MENTION
 // ========================================
 
-function reply(content) {
+function getMentionedUser(
+  message,
+  args
+) {
 
-  return json({
-    type: 4,
+  const mentioned =
+    message.mentions?.[0];
 
-    data: {
-      content: content
-    }
-  });
+  if (mentioned) {
+    return mentioned;
+  }
+
+
+  const firstArg =
+    args[0];
+
+  if (!firstArg) {
+    return null;
+  }
+
+
+  const match =
+    firstArg.match(
+      /^<@!?(\d+)>$/
+    );
+
+
+  if (!match) {
+    return null;
+  }
+
+
+  return {
+    id: match[1],
+    username: "User"
+  };
 }
