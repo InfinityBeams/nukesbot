@@ -1,13 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
-const PREFIX = ",";
-// Discord Gateway intents:
-// GUILDS + GUILD_MESSAGES + MESSAGE_CONTENT
-const INTENTS = 1 | 512 | 32768;
-/* =========================
+/* =========================================================
+   CONFIG
+========================================================= */
+const API = "https://discord.com/api/v10";
+/* =========================================================
    TIMEZONE ALIASES
-========================= */
+========================================================= */
 const TIMEZONES = {
-  // Common
   UTC: "UTC",
   GMT: "Etc/GMT",
   // Pakistan / South Asia
@@ -23,7 +22,7 @@ const TIMEZONES = {
   NEPAL: "Asia/Kathmandu",
   "SRI LANKA": "Asia/Colombo",
   MYANMAR: "Asia/Yangon",
-  // Asia
+  // East Asia
   CHINA: "Asia/Shanghai",
   JAPAN: "Asia/Tokyo",
   JST: "Asia/Tokyo",
@@ -38,12 +37,15 @@ const TIMEZONES = {
   SINGAPORE: "Asia/Singapore",
   PHILIPPINES: "Asia/Manila",
   INDONESIA: "Asia/Jakarta",
+  BRUNEI: "Asia/Brunei",
   // Middle East
   IRAN: "Asia/Tehran",
   IRAQ: "Asia/Baghdad",
   ISRAEL: "Asia/Jerusalem",
   JORDAN: "Asia/Amman",
+  LEBANON: "Asia/Beirut",
   "SAUDI ARABIA": "Asia/Riyadh",
+  SAUDI: "Asia/Riyadh",
   UAE: "Asia/Dubai",
   "UNITED ARAB EMIRATES": "Asia/Dubai",
   DUBAI: "Asia/Dubai",
@@ -60,6 +62,7 @@ const TIMEZONES = {
   YAKUTSK: "Asia/Yakutsk",
   YEKATERINBURG: "Asia/Yekaterinburg",
   NOVOSIBIRSK: "Asia/Novosibirsk",
+  KAMCHATKA: "Asia/Kamchatka",
   // Europe
   UK: "Europe/London",
   "UNITED KINGDOM": "Europe/London",
@@ -112,6 +115,8 @@ const TIMEZONES = {
   PERU: "America/Lima",
   COLOMBIA: "America/Bogota",
   VENEZUELA: "America/Caracas",
+  ECUADOR: "America/Guayaquil",
+  BOLIVIA: "America/La_Paz",
   // Africa
   "SOUTH AFRICA": "Africa/Johannesburg",
   EGYPT: "Africa/Cairo",
@@ -161,417 +166,437 @@ const TIMEZONES = {
   NZST: "Pacific/Auckland",
   NZDT: "Pacific/Auckland"
 };
-/* =========================
+/* =========================================================
    MAIN WORKER
-========================= */
+========================================================= */
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === "/") {
-      return new Response("Timezone bot is running!");
-    }
-    if (url.pathname === "/start") {
-      const id = env.TIMEZONE_BOT.idFromName(
-        "discord-gateway"
+    /* Health check */
+    if (
+      request.method === "GET" &&
+      url.pathname === "/"
+    ) {
+      return new Response(
+        "Timezone bot is running!"
       );
-      const bot = env.TIMEZONE_BOT.get(id);
-      await bot.fetch(
-        "https://internal/start"
+    }
+    /* Discord Interaction Endpoint */
+    if (
+      request.method === "POST" &&
+      url.pathname === "/interactions"
+    ) {
+      return handleInteraction(request, env);
+    }
+    return new Response(
+      "Not Found",
+      {
+        status: 404
+      }
+    );
+  }
+};
+/* =========================================================
+   DISCORD INTERACTION HANDLER
+========================================================= */
+async function handleInteraction(
+  request,
+  env
+) {
+  /* Verify Discord signature */
+  const signature =
+    request.headers.get(
+      "X-Signature-Ed25519"
+    );
+  const timestamp =
+    request.headers.get(
+      "X-Signature-Timestamp"
+    );
+  if (
+    !signature ||
+    !timestamp
+  ) {
+    return new Response(
+      "Missing Discord signature",
+      {
+        status: 401
+      }
+    );
+  }
+  const body =
+    await request.text();
+  const valid =
+    await verifyDiscordSignature(
+      body,
+      signature,
+      timestamp,
+      env.PUBLIC_KEY
+    );
+  if (!valid) {
+    return new Response(
+      "Invalid request signature",
+      {
+        status: 401
+      }
+    );
+  }
+  let interaction;
+  try {
+    interaction =
+      JSON.parse(body);
+  } catch {
+    return new Response(
+      "Invalid JSON",
+      {
+        status: 400
+      }
+    );
+  }
+  /* Discord PING */
+  if (interaction.type === 1) {
+    return json({
+      type: 1
+    });
+  }
+  /* Slash command */
+  if (
+    interaction.type === 2
+  ) {
+    return handleCommand(
+      interaction,
+      env
+    );
+  }
+  return json({
+    type: 4,
+    data: {
+      content:
+        "❌ Unsupported interaction."
+    }
+  });
+}
+/* =========================================================
+   SIGNATURE VERIFICATION
+========================================================= */
+async function verifyDiscordSignature(
+  body,
+  signature,
+  timestamp,
+  publicKey
+) {
+  try {
+    const hexToBytes = hex => {
+      const bytes =
+        new Uint8Array(
+          hex.length / 2
+        );
+      for (
+        let i = 0;
+        i < bytes.length;
+        i++
+      ) {
+        bytes[i] =
+          parseInt(
+            hex.substring(
+              i * 2,
+              i * 2 + 2
+            ),
+            16
+          );
+      }
+      return bytes;
+    };
+    const key =
+      await crypto.subtle.importKey(
+        "raw",
+        hexToBytes(publicKey),
+        {
+          name: "Ed25519"
+        },
+        false,
+        ["verify"]
+      );
+    const message =
+      new TextEncoder().encode(
+        timestamp + body
+      );
+    return await crypto.subtle.verify(
+      {
+        name: "Ed25519"
+      },
+      key,
+      hexToBytes(signature),
+      message
+    );
+  } catch (error) {
+    console.log(
+      "Signature verification error:",
+      error
+    );
+    return false;
+  }
+}
+/* =========================================================
+   COMMAND HANDLER
+========================================================= */
+async function handleCommand(
+  interaction,
+  env
+) {
+  const commandName =
+    interaction.data?.name;
+  if (
+    commandName !== "tz"
+  ) {
+    return reply(
+      "❌ Unknown command."
+    );
+  }
+  const subcommand =
+    interaction.data?.options?.[0];
+  /* =========================
+     /tz
+  ========================= */
+  if (
+    !subcommand ||
+    subcommand.type === 1 &&
+    subcommand.name === "show"
+  ) {
+    const userId =
+      interaction.member?.user?.id ||
+      interaction.user?.id;
+    const username =
+      interaction.member?.user?.username ||
+      interaction.user?.username ||
+      "User";
+    const timezone =
+      await getTimezone(
+        env,
+        userId
+      );
+    if (!timezone) {
+      return reply(
+        "🌍 You haven't set a timezone yet.\n\n" +
+        "Use `/tz set` and enter a timezone such as `Pakistan`."
+      );
+    }
+    return reply(
+      formatTimezoneMessage(
+        username,
+        timezone
+      )
+    );
+  }
+  /* =========================
+     /tz set
+  ========================= */
+  if (
+    subcommand?.type === 1 &&
+    subcommand.name === "set"
+  ) {
+    const timezoneInput =
+      getOption(
+        subcommand.options,
+        "timezone"
+      );
+    if (!timezoneInput) {
+      return reply(
+        "❌ Please provide a timezone."
+      );
+    }
+    const timezone =
+      resolveTimezone(
+        timezoneInput
+      );
+    if (!timezone) {
+      return reply(
+        `❌ Invalid timezone: **${timezoneInput}**\n\n` +
+        "Examples:\n" +
+        "• `Pakistan`\n" +
+        "• `Russia`\n" +
+        "• `Moscow`\n" +
+        "• `PST`\n" +
+        "• `Asia/Karachi`"
+      );
+    }
+    const userId =
+      interaction.member?.user?.id ||
+      interaction.user?.id;
+    await saveTimezone(
+      env,
+      userId,
+      timezone
+    );
+    return reply(
+      `✅ Your timezone has been set to **${timezone}**.\n` +
+      `🕐 Current time: **${getCurrentTime(timezone)}**`
+    );
+  }
+  /* =========================
+     /tz user
+  ========================= */
+  if (
+    subcommand?.type === 1 &&
+    subcommand.name === "user"
+  ) {
+    const user =
+      getOption(
+        subcommand.options,
+        "user"
+      );
+    if (!user) {
+      return reply(
+        "❌ Please select a user."
+      );
+    }
+    const timezone =
+      await getTimezone(
+        env,
+        user.value
+      );
+    if (!timezone) {
+      return reply(
+        `❌ <@${user.value}> hasn't set a timezone yet.`
+      );
+    }
+    const username =
+      await getDiscordUsername(
+        user.value,
+        env
+      );
+    return reply(
+      formatTimezoneMessage(
+        username,
+        timezone
+      )
+    );
+  }
+  return reply(
+    "❌ Invalid timezone command."
+  );
+}
+/* =========================================================
+   GET OPTION
+========================================================= */
+function getOption(
+  options,
+  name
+) {
+  if (!options) {
+    return null;
+  }
+  return options.find(
+    option =>
+      option.name === name
+  ) || null;
+}
+/* =========================================================
+   TIMEZONE DATABASE
+========================================================= */
+async function getTimezone(
+  env,
+  userId
+) {
+  const id =
+    env.TIMEZONE_DB.idFromName(
+      "timezone-storage"
+    );
+  const db =
+    env.TIMEZONE_DB.get(id);
+  const response =
+    await db.fetch(
+      "https://internal/get/" +
+      encodeURIComponent(userId)
+    );
+  if (!response.ok) {
+    return null;
+  }
+  const data =
+    await response.json();
+  return data.timezone || null;
+}
+async function saveTimezone(
+  env,
+  userId,
+  timezone
+) {
+  const id =
+    env.TIMEZONE_DB.idFromName(
+      "timezone-storage"
+    );
+  const db =
+    env.TIMEZONE_DB.get(id);
+  await db.fetch(
+    "https://internal/set",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/json"
+      },
+      body: JSON.stringify({
+        userId,
+        timezone
+      })
+    }
+  );
+}
+/* =========================================================
+   DURABLE OBJECT
+========================================================= */
+export class TimezoneDB extends DurableObject {
+  async fetch(request) {
+    const url =
+      new URL(request.url);
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith(
+        "/get/"
+      )
+    ) {
+      const userId =
+        decodeURIComponent(
+          url.pathname.slice(
+            5
+          )
+        );
+      const timezone =
+        await this.ctx.storage.get(
+          `timezone:${userId}`
+        );
+      return Response.json({
+        timezone:
+          timezone || null
+      });
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname === "/set"
+    ) {
+      const data =
+        await request.json();
+      await this.ctx.storage.put(
+        `timezone:${data.userId}`,
+        data.timezone
       );
       return new Response(
-        "Discord Gateway connection started."
+        "Saved"
       );
     }
-    return new Response("Not Found", {
-      status: 404
-    });
-  }
-};
-/* =========================
-   DURABLE OBJECT
-========================= */
-export class TimezoneBot extends DurableObject {
-  constructor(ctx, env) {
-    super(ctx, env);
-    this.env = env;
-    this.ws = null;
-    this.heartbeatTimer = null;
-    this.reconnectTimer = null;
-  }
-  async fetch(request) {
-    const url = new URL(request.url);
-    if (url.pathname === "/start") {
-      await this.connect();
-      return new Response("Started");
-    }
-    return new Response("Not Found", {
-      status: 404
-    });
-  }
-  /* =========================
-     CONNECT TO DISCORD
-  ========================= */
-  async connect() {
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {}
-      this.ws = null;
-    }
-    const response = await fetch(
-      "https://discord.com/api/v10/gateway/bot",
+    return new Response(
+      "Not Found",
       {
-        headers: {
-          Authorization:
-            `Bot ${this.env.BOT_TOKEN}`
-        }
-      }
-    );
-    if (!response.ok) {
-      console.log(
-        "Gateway error:",
-        response.status
-      );
-      this.scheduleReconnect();
-      return;
-    }
-    const data = await response.json();
-    const ws = new WebSocket(
-      `${data.url}/?v=10&encoding=json`
-    );
-    this.ws = ws;
-    ws.addEventListener(
-      "open",
-      () => {
-        console.log(
-          "Connected to Discord Gateway"
-        );
-      }
-    );
-    ws.addEventListener(
-      "message",
-      event => {
-        this.handleGatewayMessage(
-          event.data
-        );
-      }
-    );
-    ws.addEventListener(
-      "close",
-      () => {
-        console.log(
-          "Discord Gateway disconnected"
-        );
-        this.clearHeartbeat();
-        this.ws = null;
-        this.scheduleReconnect();
-      }
-    );
-    ws.addEventListener(
-      "error",
-      error => {
-        console.log(
-          "Gateway WebSocket error:",
-          error
-        );
+        status: 404
       }
     );
   }
-  scheduleReconnect() {
-    if (this.reconnectTimer) {
-      return;
-    }
-    this.reconnectTimer = setTimeout(
-      async () => {
-        this.reconnectTimer = null;
-        await this.connect();
-      },
-      5000
-    );
-  }
-  /* =========================
-     GATEWAY EVENTS
-  ========================= */
-  handleGatewayMessage(raw) {
-    let payload;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    const {
-      op,
-      d,
-      t
-    } = payload;
-    // Hello
-    if (op === 10) {
-      this.startHeartbeat(
-        d.heartbeat_interval
-      );
-      this.identify();
-      return;
-    }
-    // Heartbeat request
-    if (op === 1) {
-      this.sendGateway({
-        op: 1,
-        d: null
-      });
-      return;
-    }
-    // Reconnect
-    if (op === 7) {
-      try {
-        this.ws?.close();
-      } catch {}
-      return;
-    }
-    // Invalid session
-    if (op === 9) {
-      try {
-        this.ws?.close();
-      } catch {}
-      return;
-    }
-    // Message
-    if (
-      op === 0 &&
-      t === "MESSAGE_CREATE"
-    ) {
-      this.handleMessage(d);
-    }
-  }
-  identify() {
-    this.sendGateway({
-      op: 2,
-      d: {
-        token: this.env.BOT_TOKEN,
-        intents: INTENTS,
-        properties: {
-          os: "cloudflare",
-          browser: "timezone-bot",
-          device: "timezone-bot"
-        }
-      }
-    });
-  }
-  sendGateway(payload) {
-    if (!this.ws) {
-      return;
-    }
-    try {
-      this.ws.send(
-        JSON.stringify(payload)
-      );
-    } catch (error) {
-      console.log(
-        "Gateway send error:",
-        error
-      );
-    }
-  }
-  startHeartbeat(interval) {
-    this.clearHeartbeat();
-    this.heartbeatTimer = setInterval(
-      () => {
-        this.sendGateway({
-          op: 1,
-          d: null
-        });
-      },
-      interval
-    );
-  }
-  clearHeartbeat() {
-    if (this.heartbeatTimer) {
-      clearInterval(
-        this.heartbeatTimer
-      );
-      this.heartbeatTimer = null;
-    }
-  }
-  /* =========================
-     MESSAGE COMMANDS
-  ========================= */
-  async handleMessage(message) {
-    // Ignore bots
-    if (message.author?.bot) {
-      return;
-    }
-    const content =
-      message.content?.trim();
-    if (
-      !content ||
-      !content.startsWith(PREFIX)
-    ) {
-      return;
-    }
-    const commandText =
-      content
-        .slice(PREFIX.length)
-        .trim();
-    const parts =
-      commandText.split(/\s+/);
-    const command =
-      parts.shift()?.toLowerCase();
-    if (command !== "tz") {
-      return;
-    }
-    const args = parts;
-    /* ,tz */
-    if (args.length === 0) {
-      const timezone =
-        await this.getTimezone(
-          message.author.id
-        );
-      if (!timezone) {
-        await this.sendMessage(
-          message.channel_id,
-          "🌍 You haven't set a timezone yet.\n" +
-          "Use `,tz set Pakistan`"
-        );
-        return;
-      }
-      await this.showTimezone(
-        message.channel_id,
-        message.author.username,
-        timezone
-      );
-      return;
-    }
-    /* ,tz set TIMEZONE */
-    if (
-      args[0].toLowerCase() === "set"
-    ) {
-      if (!args[1]) {
-        await this.sendMessage(
-          message.channel_id,
-          "❌ Usage: `,tz set Pakistan`"
-        );
-        return;
-      }
-      const input =
-        args
-          .slice(1)
-          .join(" ");
-      const timezone =
-        resolveTimezone(input);
-      if (!timezone) {
-        await this.sendMessage(
-          message.channel_id,
-          `❌ Invalid timezone: **${input}**\n\n` +
-          "Examples:\n" +
-          "`,tz set Pakistan`\n" +
-          "`,tz set Russia`\n" +
-          "`,tz set Japan`\n" +
-          "`,tz set PST`\n" +
-          "`,tz set Asia/Karachi`"
-        );
-        return;
-      }
-      await this.ctx.storage.put(
-        `timezone:${message.author.id}`,
-        timezone
-      );
-      await this.sendMessage(
-        message.channel_id,
-        `✅ Timezone saved as **${timezone}**.\n` +
-        `🕐 Current time: **${getCurrentTime(timezone)}**`
-      );
-      return;
-    }
-    /* ,tz @user */
-    const user =
-      message.mentions?.[0];
-    if (user) {
-      const timezone =
-        await this.getTimezone(
-          user.id
-        );
-      if (!timezone) {
-        await this.sendMessage(
-          message.channel_id,
-          `❌ <@${user.id}> hasn't set a timezone yet.`
-        );
-        return;
-      }
-      await this.showTimezone(
-        message.channel_id,
-        user.username,
-        timezone
-      );
-      return;
-    }
-    await this.sendMessage(
-      message.channel_id,
-      "❌ Usage:\n" +
-      "`,tz`\n" +
-      "`,tz set Pakistan`\n" +
-      "`,tz @user`"
-    );
-  }
-  /* =========================
-     DATABASE
-  ========================= */
-  async getTimezone(userId) {
-    return await this.ctx.storage.get(
-      `timezone:${userId}`
-    );
-  }
-  /* =========================
-     DISPLAY TIMEZONE
-  ========================= */
-  async showTimezone(
-    channelId,
-    username,
-    timezone
-  ) {
-    const time =
-      getCurrentTime(timezone);
-    await this.sendMessage(
-      channelId,
-      `🌍 **${username}'s timezone**\n` +
-      `🕐 **${time}**\n` +
-      `📍 \`${timezone}\``
-    );
-  }
-  /* =========================
-     SEND MESSAGE
-  ========================= */
-  async sendMessage(
-    channelId,
-    content
-  ) {
-    const response =
-      await fetch(
-        `https://discord.com/api/v10/channels/${channelId}/messages`,
-        {
-          method: "POST",
-          headers: {
-            Authorization:
-              `Bot ${this.env.BOT_TOKEN}`,
-            "Content-Type":
-              "application/json"
-          },
-          body: JSON.stringify({
-            content
-          })
-        }
-      );
-    if (!response.ok) {
-      console.log(
-        "Discord message error:",
-        response.status,
-        await response.text()
-      );
-    }
-  }
-};
-/* =========================
+}
+/* =========================================================
    TIMEZONE RESOLVER
-========================= */
-function resolveTimezone(input) {
+========================================================= */
+function resolveTimezone(
+  input
+) {
   if (!input) {
     return null;
   }
@@ -579,7 +604,6 @@ function resolveTimezone(input) {
     input
       .trim()
       .replace(/\s+/g, " ");
-  // Country / abbreviation
   const alias =
     TIMEZONES[
       cleaned.toUpperCase()
@@ -587,18 +611,21 @@ function resolveTimezone(input) {
   if (alias) {
     return alias;
   }
-  // Direct IANA timezone
   if (
-    isValidTimezone(cleaned)
+    isValidTimezone(
+      cleaned
+    )
   ) {
     return cleaned;
   }
   return null;
 }
-/* =========================
+/* =========================================================
    VALIDATE TIMEZONE
-========================= */
-function isValidTimezone(timezone) {
+========================================================= */
+function isValidTimezone(
+  timezone
+) {
   try {
     new Intl.DateTimeFormat(
       "en-US",
@@ -611,16 +638,92 @@ function isValidTimezone(timezone) {
     return false;
   }
 }
-/* =========================
-   CURRENT TIME
-========================= */
-function getCurrentTime(timezone) {
+/* =========================================================
+   24-HOUR CURRENT TIME
+========================================================= */
+function getCurrentTime(
+  timezone
+) {
   return new Intl.DateTimeFormat(
-    "en-US",
+    "en-GB",
     {
       timeZone: timezone,
       dateStyle: "medium",
-      timeStyle: "short"
+      timeStyle: "short",
+      hourCycle: "h23"
     }
-  ).format(new Date());
+  ).format(
+    new Date()
+  );
+}
+/* =========================================================
+   FORMAT RESPONSE
+========================================================= */
+function formatTimezoneMessage(
+  username,
+  timezone
+) {
+  return (
+    `🌍 **${username}'s timezone**\n` +
+    `🕐 **${getCurrentTime(timezone)}**\n` +
+    `📍 \`${timezone}\``
+  );
+}
+/* =========================================================
+   DISCORD USERNAME
+========================================================= */
+async function getDiscordUsername(
+  userId,
+  env
+) {
+  try {
+    const response =
+      await fetch(
+        `${API}/users/${userId}`,
+        {
+          headers: {
+            Authorization:
+              `Bot ${env.BOT_TOKEN}`
+          }
+        }
+      );
+    if (!response.ok) {
+      return "User";
+    }
+    const user =
+      await response.json();
+    return (
+      user.global_name ||
+      user.username ||
+      "User"
+    );
+  } catch {
+    return "User";
+  }
+}
+/* =========================================================
+   DISCORD REPLY
+========================================================= */
+function reply(content) {
+  return json({
+    type: 4,
+    data: {
+      content
+    }
+  });
+}
+/* =========================================================
+   JSON RESPONSE
+========================================================= */
+function json(data) {
+  return new Response(
+    JSON.stringify(data),
+    {
+      status: 200,
+      headers: {
+        "Content-Type":
+          "application/json"
+      }
+    }
+  );
 }
