@@ -1,27 +1,73 @@
 import { DurableObject } from "cloudflare:workers";
 
 const PREFIX = ",";
+const GATEWAY_INTENTS = 1 | 512 | 32768;
 
-const GATEWAY_INTENTS =
-  1 |        // GUILDS
-  512 |      // GUILD_MESSAGES
-  32768;     // MESSAGE_CONTENT
+// Common timezone abbreviations.
+// Ambiguous abbreviations are assigned one specific timezone.
+const TIMEZONE_ALIASES = {
+  UTC: "UTC",
+  GMT: "Etc/GMT",
 
+  PKT: "Asia/Karachi",
+  IST: "Asia/Kolkata",
+  JST: "Asia/Tokyo",
+  KST: "Asia/Seoul",
+  CST: "America/Chicago",
+  EST: "America/New_York",
+  MST: "America/Denver",
+  PST: "America/Los_Angeles",
 
-// ========================================
-// MAIN WORKER
-// ========================================
+  AKST: "America/Anchorage",
+  HST: "Pacific/Honolulu",
+
+  AST: "America/Halifax",
+  NST: "America/St_Johns",
+
+  BRT: "America/Sao_Paulo",
+  ART: "America/Argentina/Buenos_Aires",
+
+  CET: "Europe/Paris",
+  CEST: "Europe/Paris",
+  EET: "Europe/Athens",
+  EEST: "Europe/Athens",
+
+  WET: "Europe/London",
+  WEST: "Europe/London",
+
+  SAST: "Africa/Johannesburg",
+  EAT: "Africa/Nairobi",
+  CAT: "Africa/Maputo",
+
+  GST: "Asia/Dubai",
+  AST_GULF: "Asia/Riyadh",
+
+  AFT: "Asia/Kabul",
+  NPT: "Asia/Kathmandu",
+  BDT: "Asia/Dhaka",
+  ICT: "Asia/Bangkok",
+  WIT: "Asia/Jakarta",
+  MYT: "Asia/Kuala_Lumpur",
+  SGT: "Asia/Singapore",
+  HKT: "Asia/Hong_Kong",
+  PHT: "Asia/Manila",
+  WITA: "Asia/Makassar",
+  WIT: "Asia/Jayapura",
+
+  ACST: "Australia/Adelaide",
+  AEST: "Australia/Sydney",
+  AWST: "Australia/Perth",
+  NZST: "Pacific/Auckland"
+};
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Health check
     if (url.pathname === "/") {
       return new Response("Timezone bot is running!");
     }
 
-    // Start/restart Discord Gateway connection
     if (url.pathname === "/start") {
       const id = env.TIMEZONE_BOT.idFromName("discord-gateway");
       const bot = env.TIMEZONE_BOT.get(id);
@@ -31,622 +77,393 @@ export default {
       return new Response("Discord Gateway connection started.");
     }
 
-    return new Response("Not found", { status: 404 });
+    return new Response("Not Found", { status: 404 });
   }
 };
 
-
-// ========================================
-// DURABLE OBJECT
-// ========================================
-
 export class TimezoneBot extends DurableObject {
-
   constructor(ctx, env) {
     super(ctx, env);
 
     this.env = env;
     this.ws = null;
     this.heartbeatTimer = null;
-    this.gatewayUrl = null;
     this.reconnectTimer = null;
+    this.gatewayUrl = null;
   }
 
-
   async fetch(request) {
-
     const url = new URL(request.url);
 
     if (url.pathname === "/start") {
       await this.connectToDiscord();
-
       return new Response("Started");
     }
 
-    return new Response("Not found", {
-      status: 404
-    });
+    return new Response("Not Found", { status: 404 });
   }
 
-
-  // ========================================
-  // CONNECT TO DISCORD
-  // ========================================
-
   async connectToDiscord() {
-
     if (this.ws) {
       try {
         this.ws.close();
       } catch {}
+      this.ws = null;
     }
 
-    try {
-
-      const gatewayResponse = await fetch(
-        "https://discord.com/api/v10/gateway/bot",
-        {
-          headers: {
-            "Authorization": `Bot ${this.env.BOT_TOKEN}`
-          }
+    const response = await fetch(
+      "https://discord.com/api/v10/gateway/bot",
+      {
+        headers: {
+          Authorization: `Bot ${this.env.BOT_TOKEN}`
         }
-      );
-
-      if (!gatewayResponse.ok) {
-        console.log(
-          "Gateway request failed:",
-          await gatewayResponse.text()
-        );
-
-        this.scheduleReconnect();
-        return;
       }
+    );
 
-      const gatewayData =
-        await gatewayResponse.json();
-
-      this.gatewayUrl =
-        gatewayData.url;
-
-      const ws =
-        new WebSocket(
-          `${this.gatewayUrl}/?v=10&encoding=json`
-        );
-
-      this.ws = ws;
-
-
-      ws.addEventListener(
-        "open",
-        () => {
-          console.log(
-            "Connected to Discord Gateway"
-          );
-        }
-      );
-
-
-      ws.addEventListener(
-        "message",
-        event => {
-          this.handleGatewayMessage(
-            event.data
-          );
-        }
-      );
-
-
-      ws.addEventListener(
-        "close",
-        () => {
-          console.log(
-            "Discord Gateway disconnected"
-          );
-
-          this.cleanupHeartbeat();
-
-          this.ws = null;
-
-          this.scheduleReconnect();
-        }
-      );
-
-
-      ws.addEventListener(
-        "error",
-        error => {
-          console.log(
-            "Gateway WebSocket error:",
-            error
-          );
-        }
-      );
-
-    } catch (error) {
-
+    if (!response.ok) {
       console.log(
-        "Gateway connection error:",
-        error
+        "Gateway request failed:",
+        response.status,
+        await response.text()
       );
+      this.scheduleReconnect();
+      return;
+    }
+
+    const data = await response.json();
+    this.gatewayUrl = data.url;
+
+    const ws = new WebSocket(
+      `${this.gatewayUrl}/?v=10&encoding=json`
+    );
+
+    this.ws = ws;
+
+    ws.addEventListener("open", () => {
+      console.log("Discord Gateway connected");
+    });
+
+    ws.addEventListener("message", event => {
+      this.handleGatewayMessage(event.data);
+    });
+
+    ws.addEventListener("close", () => {
+      console.log("Discord Gateway disconnected");
+
+      this.clearHeartbeat();
+      this.ws = null;
 
       this.scheduleReconnect();
-    }
+    });
+
+    ws.addEventListener("error", error => {
+      console.log("Gateway WebSocket error:", error);
+    });
   }
 
+  scheduleReconnect() {
+    if (this.reconnectTimer) return;
 
-  // ========================================
-  // GATEWAY MESSAGE
-  // ========================================
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      await this.connectToDiscord();
+    }, 5000);
+  }
 
-  async handleGatewayMessage(rawData) {
-
-    let data;
+  handleGatewayMessage(raw) {
+    let payload;
 
     try {
-      data = JSON.parse(rawData);
+      payload = JSON.parse(raw);
     } catch {
       return;
     }
 
-
-    const op = data.op;
-
+    const { op, d, t } = payload;
 
     // Hello
     if (op === 10) {
-
-      const heartbeatInterval =
-        data.d.heartbeat_interval;
-
-      this.startHeartbeat(
-        heartbeatInterval
-      );
-
+      this.startHeartbeat(d.heartbeat_interval);
       this.identify();
-
       return;
     }
 
-
-    // Heartbeat request
+    // Heartbeat requested
     if (op === 1) {
-
-      this.sendHeartbeat();
-
+      this.sendGateway({
+        op: 1,
+        d: null
+      });
       return;
     }
-
 
     // Reconnect
     if (op === 7) {
-
       try {
         this.ws?.close();
       } catch {}
-
       return;
     }
-
 
     // Invalid session
     if (op === 9) {
-
       try {
         this.ws?.close();
       } catch {}
-
       return;
     }
 
-
-    // Dispatch event
-    if (op === 0) {
-
-      const eventName =
-        data.t;
-
-      if (eventName === "MESSAGE_CREATE") {
-        await this.handleMessage(
-          data.d
-        );
-      }
+    // Discord event
+    if (op === 0 && t === "MESSAGE_CREATE") {
+      this.handleMessage(d);
     }
   }
-
-
-  // ========================================
-  // IDENTIFY
-  // ========================================
 
   identify() {
+    this.sendGateway({
+      op: 2,
+      d: {
+        token: this.env.BOT_TOKEN,
 
-    if (!this.ws) {
-      return;
-    }
+        intents: GATEWAY_INTENTS,
 
-    this.ws.send(
-      JSON.stringify({
-        op: 2,
-
-        d: {
-          token: this.env.BOT_TOKEN,
-
-          intents: GATEWAY_INTENTS,
-
-          properties: {
-            os: "linux",
-            browser: "cloudflare-worker",
-            device: "cloudflare-worker"
-          }
+        properties: {
+          os: "cloudflare",
+          browser: "timezone-bot",
+          device: "timezone-bot"
         }
-      })
-    );
+      }
+    });
   }
 
+  sendGateway(payload) {
+    if (!this.ws) return;
 
-  // ========================================
-  // HEARTBEAT
-  // ========================================
+    try {
+      this.ws.send(JSON.stringify(payload));
+    } catch (error) {
+      console.log("Gateway send error:", error);
+    }
+  }
 
   startHeartbeat(interval) {
+    this.clearHeartbeat();
 
-    this.cleanupHeartbeat();
-
-    this.heartbeatTimer =
-      setInterval(
-        () => {
-          this.sendHeartbeat();
-        },
-        interval
-      );
+    this.heartbeatTimer = setInterval(() => {
+      this.sendGateway({
+        op: 1,
+        d: null
+      });
+    }, interval);
   }
 
-
-  sendHeartbeat() {
-
-    if (
-      this.ws &&
-      this.ws.readyState === WebSocket.OPEN
-    ) {
-
-      this.ws.send(
-        JSON.stringify({
-          op: 1,
-          d: null
-        })
-      );
-    }
-  }
-
-
-  cleanupHeartbeat() {
-
+  clearHeartbeat() {
     if (this.heartbeatTimer) {
-
-      clearInterval(
-        this.heartbeatTimer
-      );
-
+      clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
   }
 
-
-  // ========================================
-  // RECONNECT
-  // ========================================
-
-  scheduleReconnect() {
-
-    if (this.reconnectTimer) {
-      return;
-    }
-
-    this.reconnectTimer =
-      setTimeout(
-        async () => {
-
-          this.reconnectTimer = null;
-
-          await this.connectToDiscord();
-
-        },
-        5000
-      );
-  }
-
-
-  // ========================================
-  // MESSAGE HANDLER
-  // ========================================
-
   async handleMessage(message) {
-
     // Ignore bots
-    if (message.author?.bot) {
+    if (message.author?.bot) return;
+
+    const content = message.content?.trim();
+
+    if (!content || !content.startsWith(PREFIX)) {
       return;
     }
 
-    const content =
-      message.content?.trim();
+    const withoutPrefix = content.slice(PREFIX.length).trim();
 
-    if (!content) {
-      return;
-    }
+    const parts = withoutPrefix.split(/\s+/);
 
-    if (!content.startsWith(PREFIX)) {
-      return;
-    }
-
-
-    const args =
-      content
-        .slice(PREFIX.length)
-        .trim()
-        .split(/\s+/);
-
-
-    const command =
-      args.shift()?.toLowerCase();
-
+    const command = parts.shift()?.toLowerCase();
 
     if (command !== "tz") {
       return;
     }
 
+    const args = parts;
 
     // ,tz
     if (args.length === 0) {
+      const timezone = await this.getUserTimezone(
+        message.author.id
+      );
 
-      await this.showTimezone(
-        message,
-        message.author.id,
-        message.author.username
+      if (!timezone) {
+        await this.sendMessage(
+          message.channel_id,
+          `🌍 You haven't set a timezone yet.\nUse \`,tz set Asia/Karachi\` or \`,tz set PKT\``
+        );
+        return;
+      }
+
+      await this.sendTimezone(
+        message.channel_id,
+        message.author.username,
+        timezone
       );
 
       return;
     }
 
+    // ,tz set TIMEZONE
+    if (args[0].toLowerCase() === "set") {
+      if (!args[1]) {
+        await this.sendMessage(
+          message.channel_id,
+          "❌ Usage: `,tz set Asia/Karachi` or `,tz set PKT`"
+        );
+        return;
+      }
 
-    // ,tz set Asia/Karachi
-    if (
-      args[0]?.toLowerCase() === "set"
-    ) {
+      const input = args[1];
 
-      const timezone =
-        args[1];
+      const timezone = resolveTimezone(input);
 
       if (!timezone) {
-
         await this.sendMessage(
           message.channel_id,
-          "❌ Usage: `,tz set Asia/Karachi`"
+          `❌ Invalid timezone: \`${input}\`\n\nExamples:\n\`PKT\` • \`PST\` • \`EST\` • \`GMT\` • \`IST\` • \`JST\`\n\nOr use a full timezone such as \`Asia/Karachi\`.`
         );
-
         return;
       }
-
-
-      if (!isValidTimezone(timezone)) {
-
-        await this.sendMessage(
-          message.channel_id,
-          "❌ Invalid timezone. Example: `Asia/Karachi`"
-        );
-
-        return;
-      }
-
 
       await this.ctx.storage.put(
         `tz:${message.author.id}`,
         timezone
       );
 
-
-      const time =
-        getCurrentTime(timezone);
-
+      const time = getCurrentTime(timezone);
 
       await this.sendMessage(
         message.channel_id,
-        `✅ Your timezone is now **${timezone}**.\n🕐 Current time: **${time}**`
+        `✅ Your timezone has been set to **${timezone}**.\n🕐 Current time: **${time}**`
       );
 
       return;
     }
-
 
     // ,tz @user
-    const mentionedUser =
-      getMentionedUser(
-        message,
-        args
-      );
-
+    const mentionedUser = getMentionedUser(message);
 
     if (mentionedUser) {
-
-      await this.showTimezone(
-        message,
-        mentionedUser.id,
-        mentionedUser.username
+      const timezone = await this.getUserTimezone(
+        mentionedUser.id
       );
 
-      return;
-    }
+      if (!timezone) {
+        await this.sendMessage(
+          message.channel_id,
+          `❌ <@${mentionedUser.id}> hasn't set a timezone yet.`
+        );
+        return;
+      }
 
-
-    await this.sendMessage(
-      message.channel_id,
-      "❌ Usage:\n`,tz set Asia/Karachi`\n`,tz @username`"
-    );
-  }
-
-
-  // ========================================
-  // SHOW TIMEZONE
-  // ========================================
-
-  async showTimezone(
-    message,
-    userId,
-    username
-  ) {
-
-    const timezone =
-      await this.ctx.storage.get(
-        `tz:${userId}`
-      );
-
-
-    if (!timezone) {
-
-      await this.sendMessage(
+      await this.sendTimezone(
         message.channel_id,
-        `❌ **${username}** hasn't set a timezone yet.`
+        mentionedUser.username,
+        timezone
       );
 
       return;
     }
 
-
-    const time =
-      getCurrentTime(timezone);
-
-
     await this.sendMessage(
       message.channel_id,
-      `🌍 **${username}**'s timezone: **${timezone}**\n🕐 Current time: **${time}**`
+      "❌ Usage: `,tz` • `,tz set PKT` • `,tz @user`"
     );
   }
 
+  async getUserTimezone(userId) {
+    return await this.ctx.storage.get(`tz:${userId}`);
+  }
 
-  // ========================================
-  // SEND DISCORD MESSAGE
-  // ========================================
+  async sendTimezone(channelId, username, timezone) {
+    const time = getCurrentTime(timezone);
 
-  async sendMessage(
-    channelId,
-    content
-  ) {
+    await this.sendMessage(
+      channelId,
+      `🌍 **${username}'s timezone**\n🕐 ${time}\n📍 \`${timezone}\``
+    );
+  }
 
-    const response =
-      await fetch(
-        `https://discord.com/api/v10/channels/${channelId}/messages`,
-        {
-          method: "POST",
+  async sendMessage(channelId, content) {
+    const response = await fetch(
+      `https://discord.com/api/v10/channels/${channelId}/messages`,
+      {
+        method: "POST",
 
-          headers: {
-            "Authorization":
-              `Bot ${this.env.BOT_TOKEN}`,
+        headers: {
+          Authorization: `Bot ${this.env.BOT_TOKEN}`,
+          "Content-Type": "application/json"
+        },
 
-            "Content-Type":
-              "application/json"
-          },
-
-          body: JSON.stringify({
-            content
-          })
-        }
-      );
-
+        body: JSON.stringify({
+          content
+        })
+      }
+    );
 
     if (!response.ok) {
-
       console.log(
-        "Failed to send Discord message:",
+        "Discord message error:",
+        response.status,
         await response.text()
       );
     }
   }
+};
+
+function resolveTimezone(input) {
+  if (!input) return null;
+
+  const cleaned = input.trim();
+
+  // Alias
+  const alias = TIMEZONE_ALIASES[cleaned.toUpperCase()];
+
+  if (alias) {
+    return alias;
+  }
+
+  // Full IANA timezone
+  if (isValidTimezone(cleaned)) {
+    return cleaned;
+  }
+
+  return null;
 }
 
-
-// ========================================
-// VALIDATE TIMEZONE
-// ========================================
-
 function isValidTimezone(timezone) {
-
   try {
-
-    new Intl.DateTimeFormat(
-      "en-US",
-      {
-        timeZone: timezone
-      }
-    ).format();
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone
+    }).format();
 
     return true;
-
   } catch {
-
     return false;
   }
 }
 
-
-// ========================================
-// CURRENT TIME
-// ========================================
-
 function getCurrentTime(timezone) {
-
-  return new Intl.DateTimeFormat(
-    "en-US",
-    {
-      timeZone: timezone,
-
-      hour: "numeric",
-      minute: "2-digit",
-
-      hour12: true
-    }
-  ).format(
-    new Date()
-  );
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(new Date());
 }
 
-
-// ========================================
-// GET @MENTION
-// ========================================
-
-function getMentionedUser(
-  message,
-  args
-) {
-
-  const mentioned =
-    message.mentions?.[0];
-
-  if (mentioned) {
-    return mentioned;
+function getMentionedUser(message) {
+  if (
+    message.mentions &&
+    message.mentions.length > 0
+  ) {
+    return message.mentions[0];
   }
 
-
-  const firstArg =
-    args[0];
-
-  if (!firstArg) {
-    return null;
-  }
-
-
-  const match =
-    firstArg.match(
-      /^<@!?(\d+)>$/
-    );
-
-
-  if (!match) {
-    return null;
-  }
-
-
-  return {
-    id: match[1],
-    username: "User"
-  };
+  return null;
 }
