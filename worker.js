@@ -1,9 +1,29 @@
+// ========================================
+// CUSTOM MESSAGES
+// ========================================
+
+const SEND_MESSAGE = "PUT YOUR /send MESSAGE HERE";
+
+const PLACEHOLDER_MESSAGE = "PUT YOUR /placeholder MESSAGE HERE";
+
+
+// ========================================
+// SLASH COMMANDS
+// ========================================
+
 const COMMANDS = [
   {
     name: "send",
     description: "Send the custom message",
     type: 1
   },
+
+  {
+    name: "placeholder",
+    description: "Send the placeholder message",
+    type: 1
+  },
+
   {
     name: "create-channel",
     description: "Create a text channel",
@@ -18,6 +38,11 @@ const COMMANDS = [
     ]
   }
 ];
+
+
+// ========================================
+// WORKER
+// ========================================
 
 export default {
   async fetch(request, env) {
@@ -40,9 +65,9 @@ export default {
 };
 
 
-// ================================
+// ========================================
 // DISCORD INTERACTIONS
-// ================================
+// ========================================
 
 async function handleInteraction(request, env) {
   const signature = request.headers.get("X-Signature-Ed25519");
@@ -67,7 +92,7 @@ async function handleInteraction(request, env) {
 
   const interaction = JSON.parse(body);
 
-  // Discord verification ping
+  // Discord verification
   if (interaction.type === 1) {
     return json({ type: 1 });
   }
@@ -78,54 +103,99 @@ async function handleInteraction(request, env) {
 
   const command = interaction.data?.name;
 
+
+  // /send
   if (command === "send") {
     return handleSend(interaction, env);
   }
 
+
+  // /placeholder
+  if (command === "placeholder") {
+    return handlePlaceholder(interaction, env);
+  }
+
+
+  // /create-channel
   if (command === "create-channel") {
     return handleCreateChannel(interaction, env);
   }
 
-  return reply("Unknown command.");
+
+  return reply("❌ Unknown command.");
 }
 
 
-// ================================
-// /send
-// ================================
+// ========================================
+// /SEND
+// ========================================
 
 async function handleSend(interaction, env) {
-
-  // 👇 CHANGE THIS MESSAGE TO WHATEVER YOU WANT
-  const message = "🔥 This is my custom message!";
 
   const response = await discordRequest(
     `/channels/${interaction.channel_id}/messages`,
     "POST",
     env.BOT_TOKEN,
     {
-      content: message
+      content: SEND_MESSAGE
     }
   );
 
   if (!response.ok) {
-    return reply("❌ I couldn't send the message.");
+    const error = await response.text();
+
+    return reply(
+      `❌ I couldn't send the message.\n\`\`\`${error.slice(0, 500)}\`\`\``
+    );
   }
 
   return reply("✅ Message sent.");
 }
 
 
-// ================================
-// /create-channel
-// ================================
+// ========================================
+// /PLACEHOLDER
+// ========================================
+
+async function handlePlaceholder(interaction, env) {
+
+  const response = await discordRequest(
+    `/channels/${interaction.channel_id}/messages`,
+    "POST",
+    env.BOT_TOKEN,
+    {
+      content: PLACEHOLDER_MESSAGE
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+
+    return reply(
+      `❌ I couldn't send the message.\n\`\`\`${error.slice(0, 500)}\`\`\``
+    );
+  }
+
+  return reply("✅ Placeholder message sent.");
+}
+
+
+// ========================================
+// /CREATE-CHANNEL
+// ========================================
 
 async function handleCreateChannel(interaction, env) {
+
   const guildId = interaction.guild_id;
 
   if (!guildId) {
-    return reply("❌ This command can only be used inside a server.");
+    return reply(
+      "❌ This command can only be used inside a server."
+    );
   }
+
+
+  // Check user's Manage Channels permission
 
   const permissions = BigInt(
     interaction.member?.permissions || "0"
@@ -139,6 +209,9 @@ async function handleCreateChannel(interaction, env) {
     );
   }
 
+
+  // Get channel name
+
   const nameOption = interaction.data?.options?.find(
     option => option.name === "name"
   );
@@ -146,8 +219,13 @@ async function handleCreateChannel(interaction, env) {
   let name = nameOption?.value;
 
   if (!name) {
-    return reply("❌ Please provide a channel name.");
+    return reply(
+      "❌ Please provide a channel name."
+    );
   }
+
+
+  // Format channel name
 
   name = name
     .toLowerCase()
@@ -155,9 +233,15 @@ async function handleCreateChannel(interaction, env) {
     .replace(/[^a-z0-9-_]/g, "")
     .slice(0, 100);
 
+
   if (!name) {
-    return reply("❌ Invalid channel name.");
+    return reply(
+      "❌ Invalid channel name."
+    );
   }
+
+
+  // Create channel
 
   const response = await discordRequest(
     `/guilds/${guildId}/channels`,
@@ -169,6 +253,7 @@ async function handleCreateChannel(interaction, env) {
     }
   );
 
+
   if (!response.ok) {
     const error = await response.text();
 
@@ -177,31 +262,40 @@ async function handleCreateChannel(interaction, env) {
     );
   }
 
-  return reply(`✅ Created **#${name}**.`);
+
+  return reply(
+    `✅ Created **#${name}**.`
+  );
 }
 
 
-// ================================
+// ========================================
 // REGISTER SLASH COMMANDS
-// ================================
+// ========================================
 
 async function registerCommands(env) {
+
   const response = await fetch(
     `https://discord.com/api/v10/applications/${env.CLIENT_ID}/commands`,
     {
       method: "PUT",
+
       headers: {
         "Authorization": `Bot ${env.BOT_TOKEN}`,
         "Content-Type": "application/json"
       },
+
       body: JSON.stringify(COMMANDS)
     }
   );
 
+
   const result = await response.text();
+
 
   return new Response(result, {
     status: response.status,
+
     headers: {
       "Content-Type": "application/json"
     }
@@ -209,28 +303,36 @@ async function registerCommands(env) {
 }
 
 
-// ================================
+// ========================================
 // DISCORD API REQUEST
-// ================================
+// ========================================
 
-async function discordRequest(path, method, token, body) {
+async function discordRequest(
+  path,
+  method,
+  token,
+  body
+) {
+
   return fetch(
     `https://discord.com/api/v10${path}`,
     {
       method: method,
+
       headers: {
         "Authorization": `Bot ${token}`,
         "Content-Type": "application/json"
       },
+
       body: JSON.stringify(body)
     }
   );
 }
 
 
-// ================================
+// ========================================
 // DISCORD SIGNATURE VERIFICATION
-// ================================
+// ========================================
 
 async function verifyDiscordRequest(
   body,
@@ -238,61 +340,96 @@ async function verifyDiscordRequest(
   timestamp,
   publicKey
 ) {
+
   try {
+
     const message = new TextEncoder().encode(
       timestamp + body
     );
 
-    const signatureBytes = hexToBytes(signature);
-    const publicKeyBytes = hexToBytes(publicKey);
 
-    const key = await crypto.subtle.importKey(
-      "raw",
-      publicKeyBytes,
-      {
-        name: "Ed25519"
-      },
-      false,
-      ["verify"]
-    );
+    const signatureBytes =
+      hexToBytes(signature);
+
+    const publicKeyBytes =
+      hexToBytes(publicKey);
+
+
+    const key =
+      await crypto.subtle.importKey(
+        "raw",
+        publicKeyBytes,
+        {
+          name: "Ed25519"
+        },
+        false,
+        ["verify"]
+      );
+
 
     return await crypto.subtle.verify(
       {
         name: "Ed25519"
       },
+
       key,
+
       signatureBytes,
+
       message
     );
 
   } catch {
+
     return false;
+
   }
 }
 
 
-// ================================
-// HELPERS
-// ================================
+// ========================================
+// HEX → BYTES
+// ========================================
 
 function hexToBytes(hex) {
-  const bytes = new Uint8Array(hex.length / 2);
 
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(
-      hex.substring(i, i + 2),
-      16
-    );
+  const bytes =
+    new Uint8Array(hex.length / 2);
+
+
+  for (
+    let i = 0;
+    i < hex.length;
+    i += 2
+  ) {
+
+    bytes[i / 2] =
+      parseInt(
+        hex.substring(i, i + 2),
+        16
+      );
   }
+
 
   return bytes;
 }
 
-function json(data, status = 200) {
+
+// ========================================
+// JSON RESPONSE
+// ========================================
+
+function json(
+  data,
+  status = 200
+) {
+
   return new Response(
     JSON.stringify(data),
+
     {
       status: status,
+
       headers: {
         "Content-Type": "application/json"
       }
@@ -300,11 +437,20 @@ function json(data, status = 200) {
   );
 }
 
+
+// ========================================
+// DISCORD REPLY
+// ========================================
+
 function reply(content) {
+
   return json({
+
     type: 4,
+
     data: {
       content: content
     }
+
   });
 }
